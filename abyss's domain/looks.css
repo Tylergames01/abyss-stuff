@@ -26,9 +26,6 @@ a:hover {
     color: crimson;
 }
 
-.bottom-of-page{
-    color: crimson;
-}
 
 .main-page {
     background-image: url('https://r2.e-z.host/11aa24c4-97e0-4fcd-8d99-462d9f69c9de/n5ukk4rn.png'); /* Replace with your image path */
@@ -45,3 +42,10 @@ a:hover {
     color:green;
 }
 
+.post-1{
+    color:crimson 
+}
+
+.post-2{
+    color: limegreen;
+}
