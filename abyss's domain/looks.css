@@ -1,0 +1,47 @@
+
+.top-of-page{
+    color: white;
+    font-size: 18px;
+    text-align: center;
+    text-align: center; 
+    background: #000000;
+    opacity:0.75;
+}
+
+
+.fish{
+    text-transform: uppercase;
+    font-size: 24px;
+}
+
+a[href*="fih-image.html"] {
+    color: orange;
+}
+
+a[href*="cheese.html"] {
+    color: #F2FF00;
+}
+
+a:hover {
+    color: crimson;
+}
+
+.bottom-of-page{
+    color: crimson;
+}
+
+.main-page {
+    background-image: url('https://r2.e-z.host/11aa24c4-97e0-4fcd-8d99-462d9f69c9de/n5ukk4rn.png'); /* Replace with your image path */
+    background-size: cover; /* Ensures the image covers the entire element */
+    background-repeat: no-repeat; /* Prevents the image from repeating */
+    background-position: center center; /* Centers the image */
+    background-attachment: fixed; /* Keeps the background fixed when scrolling */
+    background-color: #000000; /* Fallback color if image fails to load */
+
+} 
+
+.links {
+    font-size: 15px;
+    color:green;
+}
+
