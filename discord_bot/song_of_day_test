@@ -1,0 +1,316 @@
+import os
+import random
+import json
+import asyncio
+from datetime import datetime, date
+
+import discord
+from discord.ext import tasks
+from discord import app_commands
+
+import spotipy
+from spotipy.oauth2 import SpotifyOAuth
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ======================
+# PATHS / STATE FILES
+# ======================
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+USED_SONGS_FILE = os.path.join(BASE_DIR, "used_songs.json")
+CHANNEL_CONFIG_FILE = os.path.join(BASE_DIR, "channel_config.json")
+LAST_RUN_FILE = os.path.join(BASE_DIR, "last_run.txt")
+SPOTIFY_CACHE_FILE = os.path.join(BASE_DIR, "spotify_token.cache")
+SCHEDULED_SONGS_FILE = os.path.join(BASE_DIR, "scheduled_songs.json")
+
+# ======================
+# CONFIG
+# ======================
+
+PLAYLIST_ID = "3jCw4Oamo30wY0HBMZGXPl"
+POST_HOUR = 10
+POST_MINUTE = 0
+
+ALLOWED_ROLE_NAMES = {
+    "Admin",
+    "Moderator",
+    "Song Manager"
+}
+
+# ======================
+# DISCORD CLIENT
+# ======================
+
+intents = discord.Intents.default()
+client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
+
+# ======================
+# SPOTIFY AUTH
+# ======================
+
+sp = spotipy.Spotify(
+    auth_manager=SpotifyOAuth(
+        scope="playlist-read-private playlist-read-collaborative",
+        redirect_uri=os.getenv("SPOTIPY_REDIRECT_URI"),
+        cache_path=SPOTIFY_CACHE_FILE,
+        open_browser=True
+    )
+)
+
+# ======================
+# STATE HELPERS
+# ======================
+
+def load_json(path, default):
+    if os.path.exists(path):
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            pass
+    return default
+
+def save_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+def load_used_songs():
+    return set(load_json(USED_SONGS_FILE, []))
+
+def save_used_songs(data):
+    save_json(USED_SONGS_FILE, list(data))
+
+def load_channel_config():
+    return load_json(CHANNEL_CONFIG_FILE, {})
+
+def save_channel_config(data):
+    save_json(CHANNEL_CONFIG_FILE, data)
+
+def load_last_run():
+    if os.path.exists(LAST_RUN_FILE):
+        with open(LAST_RUN_FILE, "r") as f:
+            return date.fromisoformat(f.read().strip())
+    return None
+
+def save_last_run(d):
+    with open(LAST_RUN_FILE, "w") as f:
+        f.write(d.isoformat())
+
+def load_scheduled_songs():
+    return load_json(SCHEDULED_SONGS_FILE, {})
+
+def save_scheduled_songs(data):
+    save_json(SCHEDULED_SONGS_FILE, data)
+
+# ======================
+# PERMISSIONS
+# ======================
+
+def is_authorized(interaction: discord.Interaction) -> bool:
+    if interaction.user.guild_permissions.administrator:
+        return True
+    for role in getattr(interaction.user, "roles", []):
+        if role.name in ALLOWED_ROLE_NAMES:
+            return True
+    return False
+
+# ======================
+# SPOTIFY TRACK FETCH
+# ======================
+
+def get_all_tracks():
+    items = []
+    offset = 0
+
+    while True:
+        page = sp.playlist_items(
+            PLAYLIST_ID,
+            offset=offset,
+            additional_types=["track"]
+        )
+        items.extend(page["items"])
+        if page["next"] is None:
+            break
+        offset += len(page["items"])
+
+    return [i["track"] for i in items if i["track"]]
+
+# ======================
+# MAIN ACTION
+# ======================
+
+async def song_of_the_day():
+    channel_config = load_channel_config()
+    if not channel_config:
+        return
+
+    tracks = get_all_tracks()
+    if not tracks:
+        return
+
+    used = load_used_songs()
+    scheduled = load_scheduled_songs()
+    today_key = date.today().isoformat()
+
+    lookup = {t["id"]: t for t in tracks}
+
+    if today_key in scheduled:
+        song = lookup.get(scheduled.pop(today_key))
+        save_scheduled_songs(scheduled)
+    else:
+        unused = [t for t in tracks if t["id"] not in used]
+        if not unused:
+            used.clear()
+            unused = tracks
+        song = random.choice(unused)
+
+    used.add(song["id"])
+    save_used_songs(used)
+
+    embed = discord.Embed(
+        title=song["name"],
+        url=song["external_urls"]["spotify"],
+        description=f"**Artist:** {', '.join(a['name'] for a in song['artists'])}",
+        color=discord.Color.blue()
+    )
+    embed.set_thumbnail(url=song["album"]["images"][0]["url"])
+    embed.set_footer(text="Automatically selected • No repeats")
+
+    today = datetime.now().strftime("%A, %B %d, %Y")
+
+    for guild_id, channel_id in channel_config.items():
+        channel = client.get_channel(channel_id)
+        if channel:
+            await channel.send(
+                content=f"🎶 **Abyss's Song of the Day — {today}** 🎶",
+                embed=embed
+            )
+
+# ======================
+# SCHEDULER LOOP
+# ======================
+
+@tasks.loop(seconds=10)
+async def scheduler():
+    now = datetime.now()
+    today = now.date()
+    last_run = load_last_run()
+
+    if now.hour == POST_HOUR and now.minute == POST_MINUTE and last_run != today:
+        await song_of_the_day()
+        save_last_run(today)
+        await asyncio.sleep(60)
+
+# ======================
+# SLASH COMMANDS
+# ======================
+
+@tree.command(name="setchannel")
+async def setchannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("Permission denied.", ephemeral=True)
+        return
+
+    config = load_channel_config()
+    config[str(interaction.guild.id)] = channel.id
+    save_channel_config(config)
+
+    await interaction.response.send_message(
+        f"Song of the Day channel set to {channel.mention}",
+        ephemeral=True
+    )
+
+@tree.command(name="schedule_song")
+async def schedule_song(interaction: discord.Interaction, date_str: str, spotify_url: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("Permission denied.", ephemeral=True)
+        return
+
+    try:
+        target = date.fromisoformat(date_str)
+    except ValueError:
+        await interaction.response.send_message("Invalid date format (YYYY-MM-DD).", ephemeral=True)
+        return
+
+    if "/track/" not in spotify_url:
+        await interaction.response.send_message("Invalid Spotify track URL.", ephemeral=True)
+        return
+
+    track_id = spotify_url.split("/track/")[1].split("?")[0]
+    scheduled = load_scheduled_songs()
+    scheduled[target.isoformat()] = track_id
+    save_scheduled_songs(scheduled)
+
+    await interaction.response.send_message("Song scheduled.", ephemeral=True)
+
+@tree.command(name="unschedule_song")
+async def unschedule_song(interaction: discord.Interaction, date_str: str):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("Permission denied.", ephemeral=True)
+        return
+
+    scheduled = load_scheduled_songs()
+    if date_str not in scheduled:
+        await interaction.response.send_message("Nothing scheduled for that date.", ephemeral=True)
+        return
+
+    del scheduled[date_str]
+    save_scheduled_songs(scheduled)
+    await interaction.response.send_message("Schedule removed.", ephemeral=True)
+
+@tree.command(name="view_schedule")
+async def view_schedule(interaction: discord.Interaction, page: int = 1):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("Permission denied.", ephemeral=True)
+        return
+
+    scheduled = sorted(load_scheduled_songs().items())
+    if not scheduled:
+        await interaction.response.send_message("No scheduled songs.", ephemeral=True)
+        return
+
+    per_page = 10
+    total_pages = (len(scheduled) - 1) // per_page + 1
+    page = max(1, min(page, total_pages))
+
+    start = (page - 1) * per_page
+    end = start + per_page
+
+    lines = [
+        f"**{d}** → https://open.spotify.com/track/{t}"
+        for d, t in scheduled[start:end]
+    ]
+
+    await interaction.response.send_message(
+        f"📅 **Scheduled Songs (Page {page}/{total_pages})**\n\n" + "\n".join(lines),
+        ephemeral=True
+    )
+
+@tree.command(name="clear_schedule")
+async def clear_schedule(interaction: discord.Interaction):
+    if not is_authorized(interaction):
+        await interaction.response.send_message("Permission denied.", ephemeral=True)
+        return
+
+    save_scheduled_songs({})
+    await interaction.response.send_message("All scheduled songs cleared.", ephemeral=True)
+
+# ======================
+# EVENTS
+# ======================
+
+@client.event
+async def on_ready():
+    print(f"Logged in as {client.user}")
+    await tree.sync()
+    scheduler.start()
+
+# ======================
+# RUN
+# ======================
+
+client.run(os.getenv("DISCORD_BOT_TOKEN"))
