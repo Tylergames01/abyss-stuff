@@ -25,6 +25,7 @@ CHANNEL_CONFIG_FILE = os.path.join(BASE_DIR, "channel_config.json")
 LAST_RUN_FILE = os.path.join(BASE_DIR, "last_run.txt")
 SPOTIFY_CACHE_FILE = os.path.join(BASE_DIR, "spotify_token.cache")
 SCHEDULED_SONGS_FILE = os.path.join(BASE_DIR, "scheduled_songs.json")
+ALLOWED_ROLES_FILE = os.path.join(BASE_DIR, "allowed_roles.json")
 
 # ======================
 # CONFIG
@@ -34,17 +35,15 @@ PLAYLIST_ID = "3jCw4Oamo30wY0HBMZGXPl"
 POST_HOUR = 10
 POST_MINUTE = 0
 
-ALLOWED_ROLE_NAMES = {
-    "Admin",
-    "Moderator",
-    "Song Manager"
-}
-
 # ======================
 # DISCORD CLIENT
 # ======================
 
 intents = discord.Intents.default()
+intents.guilds = True
+intents.guild_messages = True
+intents.message_content = True
+
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
@@ -106,17 +105,24 @@ def load_scheduled_songs():
 def save_scheduled_songs(data):
     save_json(SCHEDULED_SONGS_FILE, data)
 
+def load_allowed_roles():
+    return load_json(ALLOWED_ROLES_FILE, {})
+
+def save_allowed_roles(data):
+    save_json(ALLOWED_ROLES_FILE, data)
+
 # ======================
-# PERMISSIONS
+# PERMISSION CHECK
 # ======================
 
-def is_authorized(interaction: discord.Interaction) -> bool:
+def is_allowed(interaction: discord.Interaction) -> bool:
+    """Admins always allowed. Otherwise check roles."""
     if interaction.user.guild_permissions.administrator:
         return True
-    for role in getattr(interaction.user, "roles", []):
-        if role.name in ALLOWED_ROLE_NAMES:
-            return True
-    return False
+
+    allowed_roles = load_allowed_roles().get(str(interaction.guild.id), [])
+    user_roles = [role.name for role in interaction.user.roles]
+    return any(role in allowed_roles for role in user_roles)
 
 # ======================
 # SPOTIFY TRACK FETCH
@@ -159,14 +165,19 @@ async def song_of_the_day():
     lookup = {t["id"]: t for t in tracks}
 
     if today_key in scheduled:
-        song = lookup.get(scheduled.pop(today_key))
-        save_scheduled_songs(scheduled)
+        song = lookup.pop(scheduled[today_key], None)
+        if song:
+            del scheduled[today_key]
+            save_scheduled_songs(scheduled)
     else:
         unused = [t for t in tracks if t["id"] not in used]
         if not unused:
             used.clear()
             unused = tracks
         song = random.choice(unused)
+
+    if song is None:
+        return
 
     used.add(song["id"])
     save_used_songs(used)
@@ -206,13 +217,31 @@ async def scheduler():
         await asyncio.sleep(60)
 
 # ======================
+# STATUS CYCLING
+# ======================
+
+async def cycle_status():
+    await client.wait_until_ready()
+    statuses = [
+        discord.Game(name="testing till i explode or work"),
+        discord.Activity(type=discord.ActivityType.listening, name="listening to todays song"),
+        discord.Activity(type=discord.ActivityType.watching, name="watching u :3"),
+    ]
+    i = 0
+    while not client.is_closed():
+        await client.change_presence(status=discord.Status.online, activity=statuses[i])
+        i = (i + 1) % len(statuses)
+        await asyncio.sleep(15)
+
+# ======================
 # SLASH COMMANDS
 # ======================
 
+# --- Set channel ---
 @tree.command(name="setchannel")
 async def setchannel(interaction: discord.Interaction, channel: discord.TextChannel):
-    if not is_authorized(interaction):
-        await interaction.response.send_message("Permission denied.", ephemeral=True)
+    if not is_allowed(interaction):
+        await interaction.response.send_message("You do not have permission.", ephemeral=True)
         return
 
     config = load_channel_config()
@@ -224,10 +253,11 @@ async def setchannel(interaction: discord.Interaction, channel: discord.TextChan
         ephemeral=True
     )
 
+# --- Schedule a song ---
 @tree.command(name="schedule_song")
 async def schedule_song(interaction: discord.Interaction, date_str: str, spotify_url: str):
-    if not is_authorized(interaction):
-        await interaction.response.send_message("Permission denied.", ephemeral=True)
+    if not is_allowed(interaction):
+        await interaction.response.send_message("You do not have permission.", ephemeral=True)
         return
 
     try:
@@ -247,10 +277,11 @@ async def schedule_song(interaction: discord.Interaction, date_str: str, spotify
 
     await interaction.response.send_message("Song scheduled.", ephemeral=True)
 
+# --- Unschedule ---
 @tree.command(name="unschedule_song")
 async def unschedule_song(interaction: discord.Interaction, date_str: str):
-    if not is_authorized(interaction):
-        await interaction.response.send_message("Permission denied.", ephemeral=True)
+    if not is_allowed(interaction):
+        await interaction.response.send_message("You do not have permission.", ephemeral=True)
         return
 
     scheduled = load_scheduled_songs()
@@ -262,10 +293,11 @@ async def unschedule_song(interaction: discord.Interaction, date_str: str):
     save_scheduled_songs(scheduled)
     await interaction.response.send_message("Schedule removed.", ephemeral=True)
 
+# --- View schedule ---
 @tree.command(name="view_schedule")
 async def view_schedule(interaction: discord.Interaction, page: int = 1):
-    if not is_authorized(interaction):
-        await interaction.response.send_message("Permission denied.", ephemeral=True)
+    if not is_allowed(interaction):
+        await interaction.response.send_message("You do not have permission.", ephemeral=True)
         return
 
     scheduled = sorted(load_scheduled_songs().items())
@@ -290,14 +322,54 @@ async def view_schedule(interaction: discord.Interaction, page: int = 1):
         ephemeral=True
     )
 
+# --- Clear schedule ---
 @tree.command(name="clear_schedule")
 async def clear_schedule(interaction: discord.Interaction):
-    if not is_authorized(interaction):
-        await interaction.response.send_message("Permission denied.", ephemeral=True)
+    if not is_allowed(interaction):
+        await interaction.response.send_message("You do not have permission.", ephemeral=True)
         return
 
     save_scheduled_songs({})
     await interaction.response.send_message("All scheduled songs cleared.", ephemeral=True)
+
+# --- Multi-role management via comma-separated role names ---
+@tree.command(name="set_allowed_roles")
+@app_commands.describe(roles="Enter role names separated by commas")
+async def set_allowed_roles(interaction: discord.Interaction, roles: str):
+    """Set which roles in this server can use bot commands."""
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Permission denied.", ephemeral=True)
+        return
+
+    role_names = [r.strip() for r in roles.split(",") if r.strip()]
+    allowed = load_allowed_roles()
+    allowed[str(interaction.guild.id)] = role_names
+    save_allowed_roles(allowed)
+
+    await interaction.response.send_message(
+        f"Allowed roles set to: {', '.join(role_names)}", ephemeral=True
+    )
+
+@tree.command(name="view_allowed_roles")
+async def view_allowed_roles(interaction: discord.Interaction):
+    allowed = load_allowed_roles().get(str(interaction.guild.id), [])
+    if not allowed:
+        await interaction.response.send_message("No roles are allowed yet.", ephemeral=True)
+        return
+    await interaction.response.send_message(f"Allowed roles: {', '.join(allowed)}", ephemeral=True)
+
+@tree.command(name="clear_allowed_roles")
+async def clear_allowed_roles(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Permission denied.", ephemeral=True)
+        return
+
+    allowed = load_allowed_roles()
+    if str(interaction.guild.id) in allowed:
+        del allowed[str(interaction.guild.id)]
+        save_allowed_roles(allowed)
+
+    await interaction.response.send_message("Allowed roles cleared.", ephemeral=True)
 
 # ======================
 # EVENTS
@@ -307,7 +379,13 @@ async def clear_schedule(interaction: discord.Interaction):
 async def on_ready():
     print(f"Logged in as {client.user}")
     await tree.sync()
+    print("Slash commands synced.")
+
+    # Start scheduler
     scheduler.start()
+
+    # Start cycling statuses
+    asyncio.create_task(cycle_status())
 
 # ======================
 # RUN
