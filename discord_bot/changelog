@@ -2,7 +2,7 @@ version 1.0
 made the bot itself very simple randomly picks a song daily
 
 ------------------------------------------------------------------------------------------------------------------------------------------
-version 1.1 still in testing
+version 1.1 
   cleaned up the bots code removing traces of it orginally being a webhook
   added commands to schedule songs 
   added status stuff
